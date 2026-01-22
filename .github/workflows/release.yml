@@ -1,0 +1,70 @@
+name: Build & Release
+
+on:
+    push:
+        branches:
+            - master
+    workflow_dispatch:
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: write
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Set up JDK
+              uses: actions/setup-java@v4
+              with:
+                  distribution: temurin
+                  java-version: 17
+
+            - name: Increase patch version
+              id: bump
+              run: |
+                  VERSION=$(sed -nE "s/^version[ \t]*=[ \t]*['\"]([^'\"]+).*/\1/p" build.gradle.kts)
+                  if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(.*)$ ]]; then
+                    PATCH=$((BASH_REMATCH[3] + 1))
+                    NEW_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$PATCH${BASH_REMATCH[4]}"
+                  else
+                    echo "Invalid version format: $VERSION"
+                    exit 1
+                  fi
+                  sed -i -E "s/^(version[ \t]*=[ \t]*['\"])([^'\"]+)(.*)/\1$NEW_VERSION\3/" build.gradle.kts
+                  echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+            - name: Commit version increase
+              run: |
+                  git config user.name "github-actions"
+                  git config user.email "github-actions@github.com"
+                  git add build.gradle.kts
+                  git commit -m "Increase version to ${{ steps.bump.outputs.version }}"
+                  git push
+
+            - name: Build with Gradle
+              run: ./gradlew clean build
+
+            - name: Upload JAR artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ github.event.repository.name }}-${{ steps.bump.outputs.version }}
+                  path: build/libs/*-all.jar
+
+            - name: Docker login
+              uses: docker/login-action@v3
+              with:
+                  username: ${{ secrets.DOCKERHUB_USERNAME }}
+                  password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Build Docker image
+              run: |
+                  docker build \
+                    --build-arg JAR_VERSION=${{ steps.bump.outputs.version }} \
+                    -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:${{ steps.bump.outputs.version }} .
+
+            - name: Push Docker image
+              run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:${{ steps.bump.outputs.version }}
